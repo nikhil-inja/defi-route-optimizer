@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeFi Routing Optimizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen">
+
+    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-lg border border-gray-700">
+        <h1 class="text-3xl font-bold text-center mb-2 text-white">DeFi Routing Optimizer</h1>
+        <p class="text-center text-gray-400 mb-6">Find the most efficient trade route on-chain.</p>
+
+        <div class="space-y-4">
+            <div>
+                <label for="from-token" class="block text-sm font-medium text-gray-300 mb-1">From</label>
+                <select id="from-token" class="w-full bg-gray-700 border border-gray-600 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+                    <!-- Options will be populated by JS -->
+                </select>
+            </div>
+            <div>
+                <label for="to-token" class="block text-sm font-medium text-gray-300 mb-1">To</label>
+                <select id="to-token" class="w-full bg-gray-700 border border-gray-600 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+                    <!-- Options will be populated by JS -->
+                </select>
+            </div>
+        </div>
+
+        <button id="find-route-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg mt-6 transition duration-300">
+            Find Optimal Route
+        </button>
+
+        <div id="results-container" class="mt-6 bg-gray-900 p-4 rounded-lg border border-gray-700 hidden">
+            <!-- Results will be injected here -->
+        </div>
+    </div>
+
+    <script>
+        // --- DATA & GRAPH SETUP (JavaScript version of our Python script) ---
+
+        // Token data
+        const TOKENS = {
+            "0x4200000000000000000000000000000000000006": { symbol: "WETH" },
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bda02913": { symbol: "USDC" },
+            "0xAAAAAAAA": { symbol: "TA" }
+        };
+
+        // Adjacency list to represent the graph: { source: [ { target, weight, price }, ... ] }
+        const marketGraph = new Map();
+
+        function addEdge(source, target, price) {
+            if (!marketGraph.has(source)) marketGraph.set(source, []);
+            marketGraph.get(source).push({
+                target: target,
+                weight: -Math.log(price),
+                price: price
+            });
+        }
+        
+        function createMarketGraph() {
+            const WETH_ADDR = "0x4200000000000000000000000000000000000006";
+            const USDC_ADDR = "0x833589fCD6eDb6E08f4c7C32D4f71b54bda02913";
+            const TOKEN_A_ADDR = "0xAAAAAAAA";
+
+            // WETH/USDC Pool
+            const price_weth_for_usdc = 3000;
+            addEdge(WETH_ADDR, USDC_ADDR, price_weth_for_usdc);
+            addEdge(USDC_ADDR, WETH_ADDR, 1 / price_weth_for_usdc);
+
+            // WETH/TA Pool (with arbitrage opportunity)
+            const price_ta_for_weth = 1.1 / 1000;
+            const price_weth_for_ta = 1 / price_ta_for_weth;
+            addEdge(WETH_ADDR, TOKEN_A_ADDR, price_weth_for_ta);
+            addEdge(TOKEN_A_ADDR, WETH_ADDR, price_ta_for_weth);
+
+            // USDC/TA Pool
+            const price_usdc_for_ta = 1.0;
+            addEdge(USDC_ADDR, TOKEN_A_ADDR, price_usdc_for_ta);
+            addEdge(TOKEN_A_ADDR, USDC_ADDR, 1 / price_usdc_for_ta);
+        }
+
+        // --- BELLMAN-FORD ALGORITHM (JavaScript Implementation) ---
+
+        function bellmanFord(startNode, endNode) {
+            const distances = {};
+            const predecessors = {};
+            
+            // Initialize distances
+            for (const tokenId in TOKENS) {
+                distances[tokenId] = Infinity;
+                predecessors[tokenId] = null;
+            }
+            distances[startNode] = 0;
+            
+            const nodes = Object.keys(TOKENS);
+            
+            // Relax edges repeatedly
+            for (let i = 0; i < nodes.length - 1; i++) {
+                marketGraph.forEach((edges, u) => {
+                    edges.forEach(({ target: v, weight }) => {
+                        if (distances[u] + weight < distances[v]) {
+                            distances[v] = distances[u] + weight;
+                            predecessors[v] = u;
+                        }
+                    });
+                });
+            }
+
+            // Check for negative weight cycles (arbitrage)
+            let negativeCycle = null;
+            marketGraph.forEach((edges, u) => {
+                edges.forEach(({ target: v, weight }) => {
+                    if (distances[u] + weight < distances[v]) {
+                        // Negative cycle detected
+                        negativeCycle = [];
+                        let curr = v;
+                        for (let i = 0; i < nodes.length; i++) {
+                           curr = predecessors[curr];
+                        }
+                        let cycleNode = curr;
+                        do {
+                           negativeCycle.unshift(cycleNode);
+                           cycleNode = predecessors[cycleNode];
+                        } while(cycleNode !== curr && !negativeCycle.includes(cycleNode));
+                        negativeCycle.unshift(cycleNode);
+                    }
+                });
+            });
+
+            if (negativeCycle) {
+                return { path: null, arbitrage: negativeCycle };
+            }
+
+            // Reconstruct path
+            if (distances[endNode] === Infinity) {
+                return { path: null, arbitrage: null }; // No path found
+            }
+            
+            const path = [];
+            let currentNode = endNode;
+            while (currentNode !== null) {
+                path.unshift(currentNode);
+                currentNode = predecessors[currentNode];
+            }
+
+            return { path: path, arbitrage: null };
+        }
+
+        // --- UI LOGIC ---
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            const fromSelect = document.getElementById('from-token');
+            const toSelect = document.getElementById('to-token');
+            const findRouteBtn = document.getElementById('find-route-btn');
+            const resultsContainer = document.getElementById('results-container');
+
+            // Populate dropdowns
+            for (const tokenId in TOKENS) {
+                const option = document.createElement('option');
+                option.value = tokenId;
+                option.textContent = `${TOKENS[tokenId].symbol}`;
+                fromSelect.appendChild(option.cloneNode(true));
+                toSelect.appendChild(option.cloneNode(true));
+            }
+            toSelect.selectedIndex = 1;
+
+            findRouteBtn.addEventListener('click', () => {
+                const startToken = fromSelect.value;
+                const endToken = toSelect.value;
+                
+                if (startToken === endToken) {
+                    resultsContainer.innerHTML = `<p class="text-yellow-400 font-medium">Please select two different tokens.</p>`;
+                    resultsContainer.classList.remove('hidden');
+                    return;
+                }
+
+                const { path, arbitrage } = bellmanFord(startToken, endToken);
+                renderResults(startToken, endToken, path, arbitrage);
+            });
+        });
+        
+        function renderResults(startToken, endToken, path, arbitrage) {
+            const resultsContainer = document.getElementById('results-container');
+            resultsContainer.classList.remove('hidden');
+            let html = '';
+
+            if (arbitrage) {
+                html += `<h2 class="text-xl font-bold text-yellow-400 mb-3">Arbitrage Opportunity Detected!</h2>`;
+                html += `<p class="text-sm text-gray-400 mb-4">A risk-free profit cycle was found:</p>`;
+                const cycle = [...arbitrage, arbitrage[0]];
+                let cycleProduct = 1.0;
+                
+                for(let i = 0; i < cycle.length -1; i++){
+                    const u = cycle[i];
+                    const v = cycle[i+1];
+                    const edge = marketGraph.get(u).find(e => e.target === v);
+                    cycleProduct *= edge.price;
+                    html += `<p class="font-mono text-sm">> ${TOKENS[u].symbol} -> ${TOKENS[v].symbol} (Rate: ${edge.price.toFixed(5)})</p>`
+                }
+                html += `<p class="mt-4 font-semibold">Starting with 1 ${TOKENS[arbitrage[0]].symbol} yields ${cycleProduct.toFixed(4)} ${TOKENS[arbitrage[0]].symbol}.</p>`
+            
+            } else if (path && path.length > 1) {
+                html += `<h2 class="text-xl font-bold text-green-400 mb-3">Optimal Route Found</h2>`;
+                let overallRate = 1.0;
+
+                for (let i = 0; i < path.length - 1; i++) {
+                    const u = path[i];
+                    const v = path[i+1];
+                    const edge = marketGraph.get(u).find(e => e.target === v);
+                    overallRate *= edge.price;
+                    html += `<p class="font-mono text-sm">> Step ${i+1}: ${TOKENS[u].symbol} &rarr; ${TOKENS[v].symbol}</p>`;
+                }
+                
+                html += `<div class="mt-4 pt-4 border-t border-gray-700">`;
+                html += `<p class="text-lg font-semibold">Final Rate: 1 ${TOKENS[startToken].symbol} = ${overallRate.toFixed(5)} ${TOKENS[endToken].symbol}</p>`;
+                html += `</div>`;
+            } else {
+                html += `<h2 class="text-xl font-bold text-red-400 mb-3">No Route Found</h2>`;
+                html += `<p>There is no possible trading path between ${TOKENS[startToken].symbol} and ${TOKENS[endToken].symbol}.</p>`;
+            }
+
+            resultsContainer.innerHTML = html;
+        }
+        
+        // Initialize the graph on load
+        createMarketGraph();
+
+    </script>
+</body>
+</html>
